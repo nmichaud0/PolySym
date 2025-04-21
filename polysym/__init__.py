@@ -1,1 +1,3 @@
-# ...empty or add package-level imports here...
+from polysym.regressor import Regressor
+
+__all__ = ['Regressor']
