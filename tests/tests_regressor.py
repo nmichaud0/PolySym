@@ -51,8 +51,6 @@ class TestRegressor(unittest.TestCase):
                                      verbose=1,
                                      workers=1)
 
-        # TODO: add multiprocessing regressors
-
     def test_fit_regressor1d(self):
         # Test fitting regressor1d does not raise errors
         try:

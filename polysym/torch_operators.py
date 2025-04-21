@@ -13,6 +13,7 @@ class Operators:
 from __future__ import annotations
 import torch
 from typing import Callable, Dict, List
+import warnings
 
 EPS = 1e-10  # global numerical buffer
 
@@ -162,6 +163,12 @@ class Operators:
         else:
             self.unary_operators = {k: v for k, v in _unary_operators_map.items() if k in operators_selection}
             self.binary_operators = {k: v for k, v in _binary_operators_map.items() if k in operators_selection}
+
+        # Secure warning if an operator in operators_selection is not in either _unary/_binary map
+
+        for op in operators_selection:
+            if op not in _unary_operators_map and op not in _binary_operators_map:
+                warnings.warn(f'Provided operator {op} not found')
 
     def get_unary(self):
 

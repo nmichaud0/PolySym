@@ -94,7 +94,7 @@ def _apply_ephemerals(ind: gp.PrimitiveTree, new_values: list[float], extracted_
     return ind
 
 
-def _evaluate_worker(ind, inputs, pset, fitness_fn, y, worst_fitness, objective, logger, optimize_ephemerals):
+def _evaluate_worker(ind, inputs, pset, fitness_fn, y, worst_fitness, objective, optimize_ephemerals):
     """
     Multiprocessing implementation
 
@@ -104,8 +104,6 @@ def _evaluate_worker(ind, inputs, pset, fitness_fn, y, worst_fitness, objective,
 
     """
     func = gp.compile(expr=ind, pset=pset)
-
-    logger.debug(f'Evaluating expression={str(ind)}')
 
     raw = func(*inputs)
 
@@ -123,6 +121,8 @@ def _evaluate_worker(ind, inputs, pset, fitness_fn, y, worst_fitness, objective,
 
     return fitness, dimensionality_mismatch, True, better_ind
 
+# TODO: check labels and final expression rendering
+# TODO: add verbose in fit method
 
 class Regressor:
     def __init__(self, X3d: Tensor,
@@ -223,7 +223,11 @@ class Regressor:
         self.pset = self._build_primitives()
         self.toolbox = self._setup_gp()
 
+        # lower than if minimization objective else higher than
+        self.compare_func = operator.lt if self.fitness_obj == -1 else operator.gt
+
         self.best_per_depth = {}
+        self.best_per_depth = {depth+1: (self.worst_fitness, None) for depth in range(self.max_depth)}
         self.best_expr = None
         self.best_compiled = None
         self.best_fit = None
@@ -235,6 +239,7 @@ class Regressor:
             level = logging.INFO
         elif self.verbose == 2:
             level = logging.DEBUG
+            warnings.warn(f'It is recommended to use single-threaded logic with DEBUG verbose level')
         else:
             warnings.warn(f'Verbose level not set to [1, 2, 3] – got {self.verbose=}\nSetting verbose to 0')
             level = logging.NOTSET
@@ -262,7 +267,6 @@ class Regressor:
                          self.y,
                          self.worst_fitness,
                          self.objective,
-                         self.logger,
                          self.optimize_ephemerals)
                         for ind in pop]
 
@@ -283,6 +287,9 @@ class Regressor:
 
             for i in range(max_iter):
 
+                if i % 10 == 0:
+                    self.logger.info(f'Running iteration {i}/{max_iter}')
+
                 fitnesses, dim_mismatches, eph_flags, new_inds = eval_fitnesses(pop)
 
                 for j, ind in enumerate(pop):
@@ -292,10 +299,21 @@ class Regressor:
                         new_ind.dim_mismatch = dim_mismatches[j]
                         new_ind.fitness = fitnesses[j]
                         pop[j] = new_ind
-                        continue
+                        ind = new_ind
+                    else:
+                        ind.dim_mismatch = dim_mismatches[j]
+                        ind.fitness = fitnesses[j]
 
-                    ind.dim_mismatch = dim_mismatches[j]
-                    ind.fitness = fitnesses[j]
+                    ## update best individuals
+                    if not dim_mismatches[j]:
+                        depth = ind.height
+                        try:
+                            if self.compare_func(ind.fitness, self.best_per_depth[depth][0]):
+                                self.best_per_depth[depth] = (ind.fitness, ind)
+                        except Exception:
+                            x000 = 0
+                            print(ind.fitness, self.best_per_depth)
+
 
                 if i == max_iter-1:
                     break
@@ -314,33 +332,31 @@ class Regressor:
                 pool.close()
                 pool.join()
 
+        self.logger.info('Finished iterating, wrapping up fitting...')
+
         pop = clean_pop
 
-        depths = sorted(list(set([len(ind) for ind in pop])))
-
-        self.best_per_depth = {depth: (self.worst_fitness, None) for depth in depths}
-
-        compare = max if self.fitness_obj == 1 else min
-        get_best = lambda a, b: compare(a, b)
-
-        for ind in pop:
-            depth = len(ind)
-            fitness = ind.fitness
-            if get_best(self.best_per_depth[depth][0], fitness) == fitness:
-                self.best_per_depth[depth] = (fitness, ind)
-
-        best_depth = None
         best_fit = self.worst_fitness
+        best_depth = None
         best_ind = None
 
         for depth, (fitness, ind) in self.best_per_depth.items():
 
-            better = (fitness < self.worst_fitness) if self.fitness_obj == 1 else (fitness > self.worst_fitness)
+            if depth is None:
+                # Never produced valid for that depth
+                continue
 
-            if best_depth is None or better:
+            better = self.compare_func(fitness, best_fit)
+
+            if better:
                 best_depth = depth
                 best_ind = ind
                 best_fit = fitness
+
+        if best_ind is None:
+            warnings.warn(f"Didn't find any good fit, must be an internal error")
+
+        best_ind = pop[0]
 
         self.best_expr = sp.sympify(str(best_ind))
         self.best_fit = best_fit
@@ -532,3 +548,15 @@ class Regressor:
     def score(self):
 
         return self.best_fit
+
+    def summary(self):
+
+        if not self.fitted:
+            warnings.warn("Model not fitted yet")
+            return
+
+        print(f"Best depth={self.best_per_depth[1][0]} fitness={self.best_per_depth[1][0]} ; expr={self.best_expr}")
+
+        # Print all expressions and loss per depth
+        for depth, (fitness, ind) in self.best_per_depth.items():
+            print(f"Depth={depth} fitness={fitness} ; expr={str(ind)}")
