@@ -122,7 +122,6 @@ def _evaluate_worker(ind, inputs, pset, fitness_fn, y, worst_fitness, objective,
     return fitness, dimensionality_mismatch, True, better_ind
 
 # TODO: check labels and final expression rendering
-# TODO: add verbose in fit method
 
 class Regressor:
     def __init__(self, X3d: Tensor,
