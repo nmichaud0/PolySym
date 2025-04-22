@@ -110,6 +110,7 @@ def safe_div(a, b):
     return a / denom
 
 def safe_pow(a, b):
+    a = torch.clip(a, -3, 3)
     base = torch.clamp(torch.abs(a)+EPS, min=EPS)   # never exactly 0
     return torch.pow(base, b)
 

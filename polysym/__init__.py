@@ -1,4 +1,4 @@
-from polysym.regressor import Regressor
-from polysym.torch_operators import Operators
+from .regressor import Regressor
+from .torch_operators import Operators
 
 __all__ = ['Regressor', 'Operators']

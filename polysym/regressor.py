@@ -1,6 +1,7 @@
 from polysym.evaluation import rmse, mse
 from polysym.torch_operators import Operators
 from polysym.utils import seed_everything, get_logger, _RandConst
+from polysym.eval_rank import is_valid_tree
 import sympy as sp
 import torch
 from torch import Tensor
@@ -13,13 +14,32 @@ from itertools import zip_longest
 import copy
 import operator
 import random
+import multiprocessing as _mp
+import numpy as np
+from functools import cache
 
-# TODO: multi-objective regressor
+try:
+    # On Linux switch to `spawn` exactly once.
+    if _mp.get_start_method(allow_none=True) != 'spawn':
+        _mp.set_start_method('spawn', force=True)
+except RuntimeError:
+    # start‑method was already set by the host programme – ignore
+    pass
+
+
+@cache
+def compile_tree(expr_str: str, pset) -> Callable:
+    """
+    Compile a GP tree *once* for each unique string representation.
+    """
+    tree = gp.PrimitiveTree.from_string(expr_str, pset)
+    return gp.compile(expr=tree, pset=pset)
+
 
 def _hill_climb_constants(ind, inputs, pset, fitness_fn, y,
                           objective, worst_fitness,
-                          steps: int = 20,
-                          sigma: float = 0.1):
+                          steps: int = 100,
+                          sigma: float = .25):
     """
     Very simple hill‑climbing over the ephemeral 'randc' constants in `ind`.
     Returns a list of new constant values of the same length/order.
@@ -37,7 +57,8 @@ def _hill_climb_constants(ind, inputs, pset, fitness_fn, y,
     def eval_with(vals):
         tmp = copy.deepcopy(ind)
         tmp = _apply_ephemerals(tmp, vals, eph)
-        func = gp.compile(expr=tmp, pset=pset)
+        # func = gp.compile(expr=tmp, pset=pset)
+        func = compile_tree(str(tmp), pset)
         out = func(*inputs)
         if out.dim() != objective:
             return worst_fitness, tmp
@@ -56,7 +77,7 @@ def _hill_climb_constants(ind, inputs, pset, fitness_fn, y,
         if f < best_fit:
             best_fit, best_vals, best_ind = f, cand, ind_tmp
 
-    return best_vals, best_ind
+    return best_vals, best_fit, best_ind
 
 
 def _extract_ephemerals(ind: gp.PrimitiveTree):
@@ -94,7 +115,7 @@ def _apply_ephemerals(ind: gp.PrimitiveTree, new_values: list[float], extracted_
     return ind
 
 
-def _evaluate_worker(ind, inputs, pset, fitness_fn, y, worst_fitness, objective, optimize_ephemerals):
+def _evaluate_worker(ind, inputs, hill_inputs, pset, fitness_fn, y, y_hill, worst_fitness, objective, optimize_ephemerals, compare_func, threshold):
     """
     Multiprocessing implementation
 
@@ -103,7 +124,8 @@ def _evaluate_worker(ind, inputs, pset, fitness_fn, y, worst_fitness, objective,
     flag tells if ephemeral optimization was done
 
     """
-    func = gp.compile(expr=ind, pset=pset)
+    # func = gp.compile(expr=ind, pset=pset)
+    func = compile_tree(str(ind), pset)
 
     raw = func(*inputs)
 
@@ -114,14 +136,23 @@ def _evaluate_worker(ind, inputs, pset, fitness_fn, y, worst_fitness, objective,
 
     fitness = worst_fitness if dimensionality_mismatch else fitness_fn(raw, y)
 
-    if not eph or not optimize_ephemerals:
+    do_opt = compare_func(fitness, threshold)
+
+    if not eph or not optimize_ephemerals or not do_opt:
         return fitness, dimensionality_mismatch, False, ind
 
-    ephemerals, better_ind = _hill_climb_constants(ind, inputs, pset, fitness_fn, y, objective, worst_fitness)
+    ephemerals, better_fit, better_ind = _hill_climb_constants(ind, hill_inputs, pset, fitness_fn, y_hill, objective, worst_fitness)
 
-    return fitness, dimensionality_mismatch, True, better_ind
+    return better_fit, dimensionality_mismatch, True, better_ind
 
 # TODO: check labels and final expression rendering
+# Done: gp.compile chaching
+# Done: booted hill climb - no need for 100% of the data
+# TODO: batch pool.starmap ?
+# TODO: typed primitives
+# TODO: Diversity restart every few gen
+# TODO: Configurator/Genetic class
+# TODO: configure pre-computed variables
 
 
 class Regressor:
@@ -135,7 +166,7 @@ class Regressor:
                        stopping_criterion: Union[float, bool]=False,
                        labels_3d: list[str] = None,
                        labels_2d: list[str] = None,
-                       min_max_constants: tuple[int, int] = (-100, 100),
+                       min_max_constants: tuple[int, int] = (-10, 10),
                        optimize_ephemerals: bool = True,
                        operators: Operators = None,
                        fitness_fn: Callable = rmse,
@@ -177,6 +208,7 @@ class Regressor:
         self.fitness_obj = fitness_obj
         self.worst_fitness = float('-inf') if fitness_obj == 1 else float('inf')
         self.pop_size = pop_size
+        self.hof_size = pop_size // 4  # 25% hof size
         self.tournament_size = tournament_size
         self.cxpb = cxpb
         self.mutpb = mutpb
@@ -212,25 +244,43 @@ class Regressor:
 
         # Prepare both batched and unbatched inputs
         self.inputs = []
+        self.hill_inputs = []
+        idx_20p = self.n_obs // 5  # idx 20 percent
+
 
         for i in range(self.X2d.shape[1]):
             self.inputs.append(self.X2d[:, i])
+            self.hill_inputs.append(self.X2d[:idx_20p, i])
 
         for i in range(self.X3d.shape[1]):
             self.inputs.append(self.X3d[:, i, :])
+            self.hill_inputs.append(self.X3d[:idx_20p, i, :])
 
+        for k, t in enumerate(self.inputs):
+            if not t.is_shared():
+                self.inputs[k] = t.share_memory_()
+
+        for k, t in enumerate(self.hill_inputs):
+            if not t.is_shared():
+                self.hill_inputs[k] = t.share_memory_()
+
+        self.y_hill = self.y[:idx_20p, :]
 
         self.pset = self._build_primitives()
         self.toolbox = self._setup_gp()
+        self.hof = tools.HallOfFame(maxsize=self.hof_size)
 
         # lower than if minimization objective else higher than
         self.compare_func = operator.lt if self.fitness_obj == -1 else operator.gt
+
+        self.best_func = min if self.fitness_obj == -1 else max
 
         self.best_per_depth = {}
         self.best_per_depth = {depth+1: (self.worst_fitness, None) for depth in range(self.max_depth)}
         self.best_expr = None
         self.best_compiled = None
         self.best_fit = None
+        self.best_depth = None
         self.fitted = False
 
         if self.verbose == 0:
@@ -246,91 +296,125 @@ class Regressor:
 
         self.logger = get_logger(level=level)
 
+        self.VALIDATE = lambda ind: is_valid_tree(ind, self.objective)
+
+        self.threshold = 1e6 * -self.fitness_obj
+        self.percentile = 30 * -self.fitness_obj
 
     def fit(self):
 
-        pop = self.toolbox.population(n=self.pop_size)
+        def get_pop(len_pop):
+            pop_ = []
+            i = 0
+            while len(pop_) < len_pop:
+                i += 1
+                new_ind = self.toolbox.population(n=1)[0]
+                if self.VALIDATE(new_ind):
+                    pop_.append(new_ind)
 
-        pool = Pool(self.workers)
+                if i >= 10*self.pop_size:
+                    warnings.warn(f'Iterated more than 10x the expected population size for valid trees without'
+                                         f'  success, try with another seed')
 
+            return pop_
 
-        def eval_fitnesses(pop):
+        pop = get_pop(self.pop_size)
 
-            if self.workers == 1:
-                result = [self.toolbox.evaluate(ind) for ind in pop]
-            else:
+        """pool = None
+        if self.workers != 1:
+            pool = Pool(self.workers)"""
+        with Pool(self.workers) as pool:
+            def eval_fitnesses(pop):
 
-                args = [(ind,
-                         self.inputs,
-                         self.pset,
-                         self.fitness_fn,
-                         self.y,
-                         self.worst_fitness,
-                         self.objective,
-                         self.optimize_ephemerals)
-                        for ind in pop]
+                if self.workers == 1:
+                    result = [self.toolbox.evaluate(ind) for ind in pop]
+                else:
 
-                result = pool.starmap(_evaluate_worker, args)
+                    args = [(ind,
+                             self.inputs,
+                             self.hill_inputs,
+                             self.pset,
+                             self.fitness_fn,
+                             self.y,
+                             self.y_hill,
+                             self.worst_fitness,
+                             self.objective,
+                             self.optimize_ephemerals,
+                             self.compare_func,
+                             self.threshold)
+                            for ind in pop]
 
-            fitnesses_, mismatches, eph_flags_, new_pop = [], [], [], []
-            for i in result:
-                fitnesses_.append(i[0])
-                mismatches.append(i[1])
-                eph_flags_.append(i[2])
-                new_pop.append(i[3])
+                    result = pool.starmap(_evaluate_worker, args)
 
-            return fitnesses_, mismatches, eph_flags_, new_pop
+                fitnesses_, mismatches, eph_flags_, new_pop = [], [], [], []
+                for i in result:
+                    fitnesses_.append(i[0])
+                    mismatches.append(i[1])
+                    eph_flags_.append(i[2])
+                    new_pop.append(i[3])
 
-        ind_dim_mismatch = True
-        max_iter = self.max_iter
-        while ind_dim_mismatch:
+                return fitnesses_, mismatches, eph_flags_, new_pop
 
-            for i in range(max_iter):
+            ind_dim_mismatch = True
+            max_iter = self.max_iter
+            while ind_dim_mismatch:
 
-                if i % 10 == 0:
-                    self.logger.info(f'Running iteration {i}/{max_iter}')
+                for i in range(max_iter):
 
-                fitnesses, dim_mismatches, eph_flags, new_inds = eval_fitnesses(pop)
+                    if i % 10 == 0:
+                        self.logger.info(f'Running iteration {i}/{max_iter}')
 
-                for j, ind in enumerate(pop):
+                    fitnesses, dim_mismatches, eph_flags, new_inds = eval_fitnesses(pop)
 
-                    if eph_flags[j]:
-                        new_ind = new_inds[j]
-                        new_ind.dim_mismatch = dim_mismatches[j]
-                        new_ind.fitness = fitnesses[j]
-                        pop[j] = new_ind
-                        ind = new_ind
-                    else:
-                        ind.dim_mismatch = dim_mismatches[j]
-                        ind.fitness = fitnesses[j]
+                    for j, ind in enumerate(pop):
 
-                    ## update best individuals
-                    if not dim_mismatches[j]:
-                        depth = ind.height
-                        try:
+                        if eph_flags[j]:
+                            new_ind = new_inds[j]
+                            new_ind.dim_mismatch = dim_mismatches[j]
+                            new_ind.fitness = fitnesses[j]
+                            pop[j] = new_ind
+                            ind = new_ind
+                        else:
+                            ind.dim_mismatch = dim_mismatches[j]
+                            ind.fitness = fitnesses[j]
+
+                        ## update best individuals
+                        if not dim_mismatches[j]:
+                            depth = ind.height
                             if self.compare_func(ind.fitness, self.best_per_depth[depth][0]):
                                 self.best_per_depth[depth] = (ind.fitness, ind)
-                        except Exception:
-                            x000 = 0
-                            print(ind.fitness, self.best_per_depth)
 
+                    best_fit = self.best_func(fitnesses)
+                    self.threshold = np.percentile(fitnesses, self.percentile)
+                    self.hof.update(pop)
 
-                if i == max_iter-1:
-                    break
+                    if self.stopping_criterion and self.compare_func(best_fit, self.stopping_criterion):
+                        ind_dim_mismatch = False
+                        self.logger.info('Callback criterion met; stopping iterations')
+                        break
 
-                parents = tools.selTournament(pop, k=self.pop_size, tournsize=self.tournament_size)
-                pop = self._variation(parents)
+                    if i == max_iter-1:
+                        break
 
-            # remove all ind that have dimensionality mismatch
-            clean_pop = [ind for ind in pop if ind.dim_mismatch is False]
+                    # 25% for hof size max + 20% of new population
+                    parents = tools.selTournament(pop, k=int(self.pop_size * .8), tournsize=self.tournament_size)
+                    offsprings = self._variation(parents)
+                    new_pop = get_pop(int(self.pop_size * .2))
+                    pop = (offsprings + new_pop)
+                    random.shuffle(pop)
+                    pop = pop[:self.pop_size - len(self.hof.items)]
+                    pop.extend(self.hof.items)
 
-            if len(clean_pop) == 0:
-                max_iter = self.rerun_iter
-                print(f"Did not find any individual that doesn't produce a dimensionality mismatch, rerunning simulation for {self.rerun_iter} iterations")
-            else:
-                ind_dim_mismatch = False
-                pool.close()
-                pool.join()
+                # remove all ind that have dimensionality mismatch
+                clean_pop = [ind for ind in pop if ind.dim_mismatch is False] + self.hof.items
+
+                if len(clean_pop) == 0:
+                    max_iter = self.rerun_iter
+                    print(f"Did not find any individual that doesn't produce a dimensionality mismatch, rerunning simulation for {self.rerun_iter} iterations")
+                else:
+                    ind_dim_mismatch = False
+                    #pool.close()
+                    #pool.join()
 
         self.logger.info('Finished iterating, wrapping up fitting...')
 
@@ -355,9 +439,9 @@ class Regressor:
 
         if best_ind is None:
             warnings.warn(f"Didn't find any good fit, must be an internal error")
+            best_ind = pop[0]
 
-        best_ind = pop[0]
-
+        self.best_depth = best_depth
         self.best_expr = sp.sympify(str(best_ind))
         self.best_fit = best_fit
 
@@ -436,7 +520,8 @@ class Regressor:
 
         def _evaluate(ind):
 
-            func = gp.compile(expr=ind, pset=self.pset)
+            # func = gp.compile(expr=ind, pset=self.pset)
+            func = compile_tree(str(ind), self.pset)
 
             self.logger.debug(f'Evaluating expression={str(ind)}')
 
@@ -451,18 +536,20 @@ class Regressor:
 
             fitness = self.worst_fitness if dimensionality_mismatch else self.fitness_fn(raw, self.y)
 
-            if not eph or not self.optimize_ephemerals:
+            do_opt = self.compare_func(fitness, self.threshold)
+
+            if not eph or not self.optimize_ephemerals or not do_opt:
                 return fitness, dimensionality_mismatch, False, ind
 
-            ephemerals, better_ind = _hill_climb_constants(ind,
-                                               self.inputs,
+            ephemerals, better_fit, better_ind = _hill_climb_constants(ind,
+                                               self.hill_inputs,
                                                self.pset,
                                                self.fitness_fn,
-                                               self.y,
+                                               self.y_hill,
                                                self.objective,
                                                self.worst_fitness)
 
-            return fitness, dimensionality_mismatch, True, better_ind
+            return better_fit, dimensionality_mismatch, True, better_ind
 
 
         tb.register("evaluate", _evaluate)
@@ -541,6 +628,13 @@ class Regressor:
             if torch.rand(1).item() < self.mutpb:
                 c2, = self.toolbox.mutate(c2)
 
+            # check if mutations are valid else get back to clone
+
+            if not self.VALIDATE(c1):
+                c1 = self.toolbox.clone(a)
+            if not self.VALIDATE(c2):
+                c2 = self.toolbox.clone(b)
+
             offspring.extend((c1, c2))
 
         return offspring
@@ -555,7 +649,7 @@ class Regressor:
             warnings.warn("Model not fitted yet")
             return
 
-        print(f"Best depth={self.best_per_depth[1][0]} fitness={self.best_per_depth[1][0]} ; expr={self.best_expr}")
+        print(f"Best depth={self.best_depth} fitness={self.best_per_depth[self.best_depth][0]} ; expr={self.best_expr}")
 
         # Print all expressions and loss per depth
         for depth, (fitness, ind) in self.best_per_depth.items():
