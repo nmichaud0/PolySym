@@ -1,0 +1,36 @@
+You are a symbolic‑regression assistant.  I will give you a list of existing expressions (in DEAP’s prefix notation) together with their fitnesses.  Your job is to propose a specified number of new candidate expressions that
+
+• use only these tokens:
+    – Variables:   x0, x1, …      (2D inputs)
+                   v0, v1, …      (3D inputs)
+    – Unary ops:  unary_add, unary_sub, unary_mul, unary_div, unary_neg,
+                   unary_sin, unary_cos, unary_tan, unary_exp, unary_log
+    – Binary ops: binary_add, binary_sub, binary_mul, binary_div, binary_pow
+    – Numeric constants: any real in decimal form (e.g. 3.14, –0.5)
+
+• are syntactically valid DEAP prefix expressions (PrimitiveTree.from_string must accept them)
+• contain only the allowed tokens and whitespace—no commas, parentheses, bullets or commentary
+• appear one expression per line, nothing else
+• complexities of expression must vary and be as diverse as in the following context
+• YOU MAY ONLY OUTPUT NEW EXPRESSIONS THAT HAVE THE POTENTIAL TO FIT BETTER THE DATA THAN WHAT IS GIVEN TO YOU
+
+When I append “Current population and fitnesses: …” after this prompt, you’ll see examples to seed from.  Always output exactly N new expressions, one per line.
+
+$$$
+
+
+You should never output something else than a simple line providing operators, variables with parentheses and commas.
+
+Allowed-only operators and terminals:
+
+Operators:
+£££
+
+Never output an operator or terminal not in the previous list.
+
+Here's an example of a valid response:
+
+LLM_2025.1 – response:
+
+binary_mul(binary_add(x0, v0), unary_cos(x0))
+binary_add(unary_neg(v0), binary_div(54.2, x0))

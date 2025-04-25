@@ -1,10 +1,9 @@
-# ─── eval_rank.py ─────────────────────────────────────────────────────────────
 from deap import gp
 
 # rank tags
-R1, R2 = 1, 2                   # 1‑D  / 2‑D tensors
+R1, R2 = 1, 2  # target ranks for 1-D and 2-D outputs
 
-# reducers that force 1‑D
+# reducers that force 1-D, but only valid if child is R2
 _UNARY_TO_RANK = {
     "unary_mean"  : R1,
     "unary_std"   : R1,
@@ -14,58 +13,66 @@ _UNARY_TO_RANK = {
 }
 
 def _terminal_rank(node: gp.Primitive) -> int:
-    """Rank for leaves:  x* → R1,  v* → R2,  constants → R1"""
-    if node.name.startswith("x"):   # scalar per obs.
+    """Rank for leaves: x* → R1, v* → R2, constants → R0"""
+    if node.name.startswith("x"):
         return R1
-    if node.name.startswith("v"):   # time‑series per obs.
+    if node.name.startswith("v"):
         return R2
-    return R1                       # randc or any constant
+    return 0  # CONSTANTS are rank-0
 
-# --------------------------------------------------------------------------- #
 def is_valid_tree(individual: gp.PrimitiveTree, objective_dim: int) -> bool:
     """
     Fast dimensionality check.
 
-    Parameters
-    ----------
     individual    : DEAP PrimitiveTree
-    objective_dim : 1  (target y is [N])   or
-                    2  (target y is [N,T])
-
-    Returns
-    -------
-    bool  – True if tree’s output rank matches target, else False
+    objective_dim : 1  (target y is a vector [N]) or
+                    2  (target y is a 2-D tensor [N,T])
     """
     if objective_dim not in (1, 2):
         raise ValueError("objective_dim must be 1 or 2")
 
-    stack = []                        # rank stack
-
-    # Walk the prefix list **from right to left** so children come first
+    stack = []
+    # Walk the prefix list from right to left so children come first
     for node in reversed(individual):
 
-        if node.arity == 0:           # Terminal --------------------------------
+        # ── Terminal nodes ──────────────────────────────────────────────
+        if node.arity == 0:
             stack.append(_terminal_rank(node))
             continue
 
-        # Non‑terminal ----------------------------------------------------------
-        if len(stack) < node.arity:   # not enough children → malformed
+        # ── Malformed check ─────────────────────────────────────────────
+        if len(stack) < node.arity:
             return False
 
-        # Pop children ranks
+        # ── Pop child ranks ─────────────────────────────────────────────
         child_ranks = [stack.pop() for _ in range(node.arity)]
 
-        if node.name.startswith("binary_"):
-            result_rank = max(child_ranks)           # broadcasting rule
-        else:  # unary
-            result_rank = _UNARY_TO_RANK.get(node.name, child_ranks[0])
+        # ── Decide output rank ──────────────────────────────────────────
+        if node.arity > 1:
+            # Multi-input primitives broadcast (e.g. add, mul)
+            result_rank = max(child_ranks)
+
+        elif node.arity == 1:
+            # Unary operator
+            child_r = child_ranks[0]
+            if node.name in _UNARY_TO_RANK:
+                # Reducers only on R2 inputs
+                if child_r != R2:
+                    return False
+                result_rank = R1
+            else:
+                # Elementwise unary (neg, abs, etc.) preserves rank
+                result_rank = child_r
+
+        else:
+            # Shouldn’t happen (arity==0 handled above)
+            result_rank = child_ranks[0]
 
         stack.append(result_rank)
 
-    # At the end exactly one rank must remain
+    # ── Final check ───────────────────────────────────────────────────
     if len(stack) != 1:
         return False
 
     target_rank = R2 if objective_dim == 2 else R1
     return stack[0] == target_rank
-# ─────────────────────────────────────────────────────────────────────────────

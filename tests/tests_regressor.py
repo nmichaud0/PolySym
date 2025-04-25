@@ -1,5 +1,5 @@
 import unittest
-from polysym import Regressor
+from polysym import PolySymModel
 import torch
 
 class TestRegressor(unittest.TestCase):
@@ -31,7 +31,7 @@ class TestRegressor(unittest.TestCase):
             y1d[obs] = torch.mean(y).item()
             y2d[obs] = y
 
-        self.regressor2d = Regressor(X3d=X3d,
+        self.regressor2d = PolySymModel(X3d=X3d,
                                      X2d=X2d,
                                      y=y2d,
                                      max_complexity=10,
@@ -41,7 +41,7 @@ class TestRegressor(unittest.TestCase):
                                      verbose=1,
                                      workers=1)
 
-        self.regressor1d = Regressor(X3d=X3d,
+        self.regressor1d = PolySymModel(X3d=X3d,
                                      X2d=X2d,
                                      y=y1d,
                                      max_complexity=10,
@@ -91,13 +91,13 @@ class TestRegressor(unittest.TestCase):
 
     def test_predict_without_fit_regressor1d(self):
         # Test predict raises error if not fitted (regressor1d)
-        reg = Regressor(X3d=self.regressor1d.X3d, X2d=self.regressor1d.X2d, y=self.regressor1d.y)
+        reg = PolySymModel(X3d=self.regressor1d.X3d, X2d=self.regressor1d.X2d, y=self.regressor1d.y)
         with self.assertRaises(Exception):
             reg.predict()
 
     def test_predict_without_fit_regressor2d(self):
         # Test predict raises error if not fitted (regressor2d)
-        reg = Regressor(X3d=self.regressor2d.X3d, X2d=self.regressor2d.X2d, y=self.regressor2d.y)
+        reg = PolySymModel(X3d=self.regressor2d.X3d, X2d=self.regressor2d.X2d, y=self.regressor2d.y)
         with self.assertRaises(Exception):
             reg.predict()
 

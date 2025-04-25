@@ -39,9 +39,11 @@ def maybe_unsqueeze(a, b):
     a, b = _as_tensor(a, b), _as_tensor(b, a)
 
     if a.dim() == 1 and b.dim() == 2 and a.size(0) == b.size(0):
-        return a.unsqueeze(-1), b
+        # return a.unsqueeze(-1), b
+        return a.unsqueeze(1), b
     if b.dim() == 1 and a.dim() == 2 and a.size(0) == b.size(0):
-        return a, b.unsqueeze(-1)
+        # return a, b.unsqueeze(-1)
+        return a, b.unsqueeze(1)
     return a, b
 
 
@@ -76,9 +78,11 @@ class BinaryOp:
         a2, b2 = _as_tensor(a, b), _as_tensor(b, a)
         # broadcast [N] vs [N,T]
         if a2.dim()==1 and b2.dim()==2 and a2.size(0)==b2.size(0):
-            a2 = a2.unsqueeze(-1)
+            #a2 = a2.unsqueeze(-1)
+            a2 = a2.unsqueeze(1)
         elif b2.dim()==1 and a2.dim()==2 and b2.size(0)==a2.size(0):
-            b2 = b2.unsqueeze(-1)
+            #b2 = b2.unsqueeze(-1)
+            b2 = b2.unsqueeze(1)
         return self.fn(a2, b2)
 
 # ─────────────────────── safe element‑wise ──────────────────
@@ -167,9 +171,10 @@ class Operators:
 
         # Secure warning if an operator in operators_selection is not in either _unary/_binary map
 
-        for op in operators_selection:
-            if op not in _unary_operators_map and op not in _binary_operators_map:
-                warnings.warn(f'Provided operator {op} not found')
+        if operators_selection is not None:
+            for op in operators_selection:
+                if op not in _unary_operators_map and op not in _binary_operators_map:
+                    warnings.warn(f'Provided operator {op} not found')
 
     def get_unary(self):
 

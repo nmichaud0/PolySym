@@ -3,3 +3,4 @@ matplotlib
 sympy
 deap
 torch
+ollama
