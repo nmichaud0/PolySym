@@ -1,3 +1,3 @@
-from .polysym import Regressor, Operators
+from .polysym import PolySymModel, Operators
 
-__all__ = ['Regressor', 'Operators']
+__all__ = ['PolySymModel', 'Operators']

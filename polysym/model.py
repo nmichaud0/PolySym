@@ -23,7 +23,8 @@ class PolySymModel(Configurator):
 
     def fit(self):
 
-        pop = self.toolbox.population(n=self.pop_size)
+        # pop = self.toolbox.population(n=self.pop_size)
+        pop = self._balanced_population(self.pop_size)
 
         with get_pool(self.workers) as pool:
             def eval_fitnesses(pop):
@@ -165,7 +166,8 @@ class PolySymModel(Configurator):
                         # fill last half with new pop
                         # make variations
                         best_hof = self.hof[:10] * int(self.pop_size // 20)
-                        new_pop = self.toolbox.population(n=int(self.pop_size // 2))
+                        # new_pop = self.toolbox.population(n=int(self.pop_size // 2))
+                        new_pop = self._balanced_population(self.pop_size // 2)
                         var_pop = best_hof + new_pop
                         random.shuffle(var_pop)
                         offsprings = self._variation(var_pop)
@@ -188,11 +190,14 @@ class PolySymModel(Configurator):
                         offsprings = self._variation(parents)
 
                         # add new individuals
-                        new_pop = self.toolbox.population(n=int(self.pop_size * .1))
+                        # new_pop = self.toolbox.population(n=int(self.pop_size * .1))
+                        new_pop = self._balanced_population(int(self.pop_size * .1))
 
                         pop = (offsprings + new_pop)
                         random.shuffle(pop)
                         pop = pop[:self.pop_size]  # fix overshoot
+
+                    pop = self._rebalance(pop)
 
                 # remove all ind that have dimensionality mismatch
                 clean_pop = [ind for ind in pop if ind.dim_mismatch is False] + self.hof.items
@@ -380,6 +385,7 @@ class PolySymModel(Configurator):
 
         ax.set_xlabel('Generation', fontsize=15)
         ax.set_ylabel(f'Loss: {self.fitness_fn.__name__.capitalize()}', fontsize=15)
+        ax.set_ylim(-1, 1)
 
         for depth, fitnesses in self.differential_losses.items():
             ax.plot(fitnesses, label=f'Depth={depth}', lw=2)

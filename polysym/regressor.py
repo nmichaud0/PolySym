@@ -166,6 +166,9 @@ class Configurator:
         self.best_depth = None
         self.fitted = False
 
+        self.depth_weights = {d: 2 ** (d-self.min_depth) for d in range(1, self.max_depth+1)}
+        self.depth_quota = self._compute_depth_quota(self.pop_size)
+
         if self.verbose == 0:
             level = logging.NOTSET
         elif self.verbose == 1:
@@ -199,6 +202,46 @@ class Configurator:
         else:
             return max(a)
 
+    def _compute_depth_quota(self, n: int) -> dict[int, int]:
+        """Desired number of individuals per depth for a pop of size n."""
+        w = np.array(list(self.depth_weights.values()), dtype=float)
+        w /= w.sum()
+        counts = (n * w).round().astype(int)
+        while counts.sum() < n:
+            counts[np.argmax(w)] += 1
+        while counts.sum() > n:
+            counts[np.argmin(w)] -= 1
+        return dict(zip(self.depth_weights, counts))
+
+    def _make_individuals(self, depth: int, n: int=1):
+
+        pop_fn = getattr(self.toolbox, f'population_depth_{depth}')
+        return pop_fn(n=n)
+
+    def _balanced_population(self, n: int):
+        pop = []
+        for depth, k in self.depth_quota.items():
+            pop.extend(self._make_individuals(depth, k))
+        random.shuffle(pop)
+        return pop
+
+    def _rebalance(self, pop: list):
+        counts = {d: 0 for d in self.depth_quota}
+        keep = []
+        for ind in pop:
+            d = ind.height
+            if d in self.depth_quota and counts[d] < self.depth_quota[d]:
+                keep.append(ind)
+                counts[d] += 1
+
+        for d, need in self.depth_quota.items():
+            deficit = need - counts[d]
+            if deficit > 0:
+                keep.extend(self._make_individuals(d, deficit))
+
+        random.shuffle(keep)
+        return keep[:self.pop_size]
+
     def _setup_gp(self):
 
         if "Fitness" not in creator.__dict__:
@@ -207,9 +250,50 @@ class Configurator:
             creator.create("Individual", gp.PrimitiveTree, fitness=creator.Fitness, dim_mismatch=None)
 
         tb = base.Toolbox()
-        tb.register('expr_init', gp.genFull, pset=self.pset, min_=self.min_depth, max_=self.max_depth)
+        tb.register('expr_init', gp.genHalfAndHalf, pset=self.pset, min_=self.min_depth, max_=self.max_depth)
         tb.register("individual", tools.initIterate, creator.Individual, tb.expr_init)
         tb.register("population", tools.initRepeat, list, tb.individual)
+
+        def _wrap_population(generate):
+            def wrapper(*args, **kwargs):
+                pop_ = []
+                i = 0
+                n = kwargs['n']
+                while len(pop_) < n:
+                    i += 1
+                    batch = generate(n=n - len(pop_), *args)
+                    for ind in batch:
+                        if self.validate(ind):
+                            pop_.append(ind)
+                            if len(pop_) >= n:
+                                break
+                return pop_
+
+            return wrapper
+
+        for d in range(1, self.max_depth+1):
+            tb.register(
+                f'expr_depth_{d}',
+                gp.genHalfAndHalf,
+                pset = self.pset,
+                min_=d, max_=d
+            )
+
+            tb.register(
+                f'individual_depth_{d}',
+                tools.initIterate,
+                creator.Individual,
+                getattr(tb, f'expr_depth_{d}')
+            )
+
+            tb.register(
+                f'population_depth_{d}',
+                tools.initRepeat,
+                list,
+                getattr(tb, f'individual_depth_{d}')
+            )
+
+            tb.decorate(f'population_depth_{d}', _wrap_population)
 
         tb.register('clone', copy.deepcopy)
 
@@ -234,23 +318,6 @@ class Configurator:
 
         tb.register("select", tools.selTournament, tournsize=self.tournament_size)
         tb.register("mate", gp.cxOnePoint)
-
-        def _wrap_population(generate):
-            def wrapper(*args, **kwargs):
-                pop_ = []
-                i = 0
-                n = kwargs['n']
-                while len(pop_) < n:
-                    i += 1
-                    batch = generate(n=n - len(pop_), *args)
-                    for ind in batch:
-                        if self.validate(ind):
-                            pop_.append(ind)
-                            if len(pop_) >= n:
-                                break
-                return pop_
-
-            return wrapper
 
         tb.decorate('population', _wrap_population)
         tb.decorate('mate', gp.staticLimit(key=operator.attrgetter('height'), max_value=self.max_depth))
@@ -297,53 +364,6 @@ class Configurator:
         pset.arguments = [str(v) for v in sy2 + sy3]
 
         return pset
-
-    def _build_primitives2(self):
-        """Create symbols and DEAP PrimitiveSet once."""
-    
-        n2, n3 = self.X2d.shape[1], self.X3d.shape[1]
-    
-        # Handle both cases: single symbol or multiple symbols
-        if n2 == 1:
-            sy2 = [sp.symbols("x0")]
-        else:
-            sy2 = list(sp.symbols(" ".join(f"x{i}" for i in range(n2))))
-    
-        if n3 == 1:
-            sy3 = [sp.symbols("v0")]
-        else:
-            sy3 = list(sp.symbols(" ".join(f"v{i}" for i in range(n3))))
-    
-        self.symbols = sy2 + sy3
-
-        # Get function lists with their names
-        unary_fns = list(self.operators.unary_operators.items())
-        binary_fns = list(self.operators.binary_operators.items())
-
-        pset = gp.PrimitiveSet("MAIN", len(self.symbols))
-
-
-        # Add unary functions with their proper names
-        for name, fn in unary_fns:
-            pset.addPrimitive(fn, 1, name=f"unary_{name}")
-    
-        # Add binary functions with their proper names
-        for name, fn in binary_fns:
-            pset.addPrimitive(fn, 2, name=f"binary_{name}")
-    
-        for s in self.symbols:
-            pset.addTerminal(s, name=str(s))
-
-        randc = _RandConst(self.min_constant, self.max_constant)
-
-        pset.addEphemeralConstant("randc", randc)
-
-        self.symbols.append('ephemeral')
-
-        #pset.renameArguments(**{f"ARG{i}": str(s) for i, s in enumerate(self.symbols)})
-        
-        return pset
-
 
     def _variation(self, parents: list[gp.PrimitiveTree]) -> list[gp.PrimitiveTree]:
         """
