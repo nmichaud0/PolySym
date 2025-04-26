@@ -87,7 +87,7 @@ class Configurator:
 
         self.labels_3d = labels_3d
         self.labels_2d = labels_2d
-        self.labels = labels_2d + labels_3d
+        self.labels = labels_2d + labels_3d if labels_2d is not None else None
 
         assert self.X3d.shape[1] == len(self.labels_3d)
         assert self.X2d.shape[1] == len(self.labels_2d)
@@ -162,8 +162,9 @@ class Configurator:
         self.hof = tools.HallOfFame(maxsize=self.hof_size)
 
         self.subs = {}
-        for var_sym, label in zip(self.symbols, self.labels):
-            self.subs[var_sym] = sp.symbols(label)
+        if self.labels is not None:
+            for var_sym, label in zip(self.symbols, self.labels):
+                self.subs[var_sym] = sp.symbols(label)
 
 
         self.best_per_depth = {}
@@ -432,7 +433,10 @@ class Configurator:
                 sym_expr = sp.sympify(expr, locals=self.operators.map)
                 sym_expr = _round_floats(sym_expr)
                 sym_expr = sym_expr.evalf(2)
-                tex = sp.latex(sym_expr.subs(self.subs))
+                if self.labels is not None:
+                    tex = sp.latex(sym_expr.subs(self.subs))
+                else:
+                    tex = sp.latex(sym_expr)
                 display(Math(f"\\text{{Depth={depth} (fit={fitness:.2f})}}\\quad {tex}"))
                 print('')
         else:

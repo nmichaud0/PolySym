@@ -4,7 +4,7 @@ from typing import Callable, Dict, List
 import warnings
 import sympy as sp
 
-EPS = 1e-10  # global numerical buffer
+EPS = 1e-12  # global numerical buffer
 
 
 # ───────────────────────── helpers ──────────────────────────
