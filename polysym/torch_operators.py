@@ -88,12 +88,35 @@ def safe_asin(x): return torch.arcsin(torch.clamp(x, -1+EPS, 1-EPS))
 def safe_acos(x): return torch.arccos(torch.clamp(x, -1+EPS, 1-EPS))
 
 # ─────────────────────── reductions (dim‑safe) ──────────────
-def _mean(x):   x=_as_tensor(x); return x.mean(dim=-1)      if x.dim()>1 else x.mean()
-def _sum(x):    x=_as_tensor(x); return x.sum(dim=-1)       if x.dim()>1 else x.sum()
-def _std(x):    x=_as_tensor(x); return x.std(dim=-1, unbiased=False) if x.dim()>1 else x.std(unbiased=False)
-def _median(x): x=_as_tensor(x); return x.median(dim=-1)[0] if x.dim()>1 else x.median()
-def _min(x):    x=_as_tensor(x); return x.min(dim=-1)[0]    if x.dim()>1 else x.min()
-def _max(x):    x=_as_tensor(x); return x.max(dim=-1)[0]    if x.dim()>1 else x.max()
+def _mean(x):
+    x = _as_tensor(x)
+    out = x.mean(dim=-1, keepdim=True)
+    return out.squeeze(-1)
+
+def _sum(x):
+    x = _as_tensor(x)
+    out = x.sum(dim=-1, keepdim=True)
+    return out.squeeze(-1)
+
+def _std(x):
+    x = _as_tensor(x)
+    out = x.std(dim=-1, unbiased=False, keepdim=True)
+    return out.squeeze(-1)
+
+def _median(x):
+    x = _as_tensor(x)
+    out = x.median(dim=-1, keepdim=True)[0]
+    return out.squeeze(-1)
+
+def _min(x):
+    x = _as_tensor(x)
+    out = x.min(dim=-1, keepdim=True)[0]
+    return out.squeeze(-1)
+
+def _max(x):
+    x = _as_tensor(x)
+    out = x.max(dim=-1, keepdim=True)[0]
+    return out.squeeze(-1)
 
 # ───────────────────── binary safe variants ─────────────────
 # polysym/torch_operators.py

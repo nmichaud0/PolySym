@@ -91,9 +91,6 @@ class PolySymModel(Configurator):
                         self.logger.info(f'Running iteration {i}/{max_iter}; best fit={bf:.2f}')
 
                     fitnesses, dim_mismatches, eph_flags, new_inds = eval_fitnesses(pop)
-                    # TODO: reduce max depth once it haven't improved for n_iter ?
-                    #  Should update self.toolbox
-                    # TODO: add another fitness constant for the constants count
 
                     # UPDATE INDIVIDUALS
                     for j, ind in enumerate(pop):
@@ -395,8 +392,6 @@ class PolySymModel(Configurator):
         plt.show()
 
     def plot_depth_per_gen(self):
-
-        # TODO: find a way to balance the depth of individuals per generation ?
 
         fig, ax = plt.subplots(figsize=(10, 6))
 
