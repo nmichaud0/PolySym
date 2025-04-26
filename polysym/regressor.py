@@ -414,7 +414,7 @@ class Configurator:
 
         return self.best_fit
 
-    def summary(self):
+    def summary(self, pretty_print=True):
 
         if not self.fitted:
             warnings.warn("Model not fitted yet")
@@ -422,15 +422,19 @@ class Configurator:
 
         print(f'Best depth={self.best_depth}', end='\n\n')
 
-        # Print all expressions and loss per depth
-        for depth, (fitness, expr, ind) in self.best_per_depth.items():
-            """print(f"Depth={depth} fitness={fitness:.2f} expr:", end='\n\n')
-            display(Math(sp.latex(sp.sympify(round_ind(expr), locals=self.operators.map))))
-            print('\n\n')"""
+        if pretty_print:
+            # Print all expressions and loss per depth
+            for depth, (fitness, expr, ind) in self.best_per_depth.items():
+                """print(f"Depth={depth} fitness={fitness:.2f} expr:", end='\n\n')
+                display(Math(sp.latex(sp.sympify(round_ind(expr), locals=self.operators.map))))
+                print('\n\n')"""
 
-            sym_expr = sp.sympify(expr, locals=self.operators.map)
-            sym_expr = _round_floats(sym_expr)
-            sym_expr = sym_expr.evalf(2)
-            tex = sp.latex(sym_expr.subs(self.subs))
-            display(Math(f"\\text{{Depth={depth} (fit={fitness:.2f})}}\\quad {tex}"))
-            print('')
+                sym_expr = sp.sympify(expr, locals=self.operators.map)
+                sym_expr = _round_floats(sym_expr)
+                sym_expr = sym_expr.evalf(2)
+                tex = sp.latex(sym_expr.subs(self.subs))
+                display(Math(f"\\text{{Depth={depth} (fit={fitness:.2f})}}\\quad {tex}"))
+                print('')
+        else:
+            for depth, (fitness, expr, ind) in self.best_per_depth.items():
+                print(f'Depth={depth} fitness={fitness:.2f} expr: {expr}', end='\n\n')
