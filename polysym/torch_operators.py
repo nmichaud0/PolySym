@@ -1,19 +1,8 @@
-"""from polysym.torch_operators_batched import BatchedOperators
-from polysym.torch_operators_unbatched import UnbatchedOperators
-
-
-class Operators:
-    def __new__(cls, batched: bool, *args, **kwargs):
-        target = BatchedOperators if batched else UnbatchedOperators
-        return target(*args, **kwargs)
-"""
-
-
-# torch_operators.py
 from __future__ import annotations
 import torch
 from typing import Callable, Dict, List
 import warnings
+import sympy as sp
 
 EPS = 1e-10  # global numerical buffer
 
@@ -176,6 +165,8 @@ class Operators:
                 if op not in _unary_operators_map and op not in _binary_operators_map:
                     warnings.warn(f'Provided operator {op} not found')
 
+        self.map = self._get_map()
+
     def get_unary(self):
 
         return list(self.unary_operators.values())
@@ -189,3 +180,51 @@ class Operators:
 
     def get_binary_dict(self):
         return self.binary_operators
+
+    def _get_map(self) -> dict[str, Callable]:
+        """
+        Return a mapping from DSL names (e.g. 'binary_add', 'unary_sin', …)
+        to Sympy functions or lambdas, initializing with known mappings
+        and filling in any remaining operators dynamically.
+        """
+        # 1) start from the “known” Sympy primitives
+        locals_map: dict[str, Callable] = {
+            # binary
+            'binary_add': sp.Add,
+            'binary_sub': lambda a, b: a - b,
+            'binary_mul': sp.Mul,
+            'binary_div': lambda a, b: a / b,
+            'binary_pow': sp.Pow,
+            # unary
+            'unary_neg': lambda x: -x,
+            'unary_abs': sp.Abs,
+            'unary_sin': sp.sin,
+            'unary_cos': sp.cos,
+            'unary_tan': sp.tan,
+            'unary_exp': sp.exp,
+            'unary_log': sp.log,
+            # reduction-style (wrap as function)
+            'unary_mean': lambda x: sp.Function('mean')(x),
+            'unary_sum': lambda x: sp.Function('sum')(x),
+            'unary_std': lambda x: sp.Function('std')(x),
+            # …add any others you know ahead of time…
+        }
+
+        # 2) fill in any remaining binary ops from self.binary_operators
+        for name in self.binary_operators:
+            key = f"binary_{name}"
+            if key in locals_map:
+                continue
+            # fallback: generic 2-arg Function
+            locals_map[key] = lambda a, b, _n=name: sp.Function(_n)(a, b)
+
+        # 3) fill in any remaining unary ops from self.unary_operators
+        for name in self.unary_operators:
+            key = f"unary_{name}"
+            if key in locals_map:
+                continue
+            # fallback: generic 1-arg Function
+            locals_map[key] = lambda x, _n=name: sp.Function(_n)(x)
+
+        return locals_map
+

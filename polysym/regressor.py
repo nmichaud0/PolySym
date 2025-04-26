@@ -7,7 +7,8 @@ from polysym.utils import (seed_everything,
                            _hill_climb_constants,
                            _extract_ephemerals,
                            _evaluate_worker,
-                           scale_data)
+                           scale_data,
+                           _round_floats)
 from polysym.eval_rank import is_valid_tree
 import sympy as sp
 import torch
@@ -23,6 +24,7 @@ import operator
 import random
 import multiprocessing as _mp
 import numpy as np
+from IPython.display import display, Math
 
 try:
     # On Linux switch to `spawn` exactly once.
@@ -31,8 +33,6 @@ try:
 except RuntimeError:
     # start‑method was already set by the host programme – ignore
     pass
-
-# TODO: check labels and final expression rendering
 
 class Configurator:
     def __init__(self, X3d: Tensor,
@@ -87,6 +87,10 @@ class Configurator:
 
         self.labels_3d = labels_3d
         self.labels_2d = labels_2d
+        self.labels = labels_2d + labels_3d
+
+        assert self.X3d.shape[1] == len(self.labels_3d)
+        assert self.X2d.shape[1] == len(self.labels_2d)
 
         self.min_constant = min_max_constants[0]
         self.max_constant = min_max_constants[1]
@@ -156,6 +160,11 @@ class Configurator:
         self.pset = self._build_primitives()
         self.toolbox = self._setup_gp()
         self.hof = tools.HallOfFame(maxsize=self.hof_size)
+
+        self.subs = {}
+        for var_sym, label in zip(self.symbols, self.labels):
+            self.subs[var_sym] = sp.symbols(label)
+
 
         self.best_per_depth = {}
         self.best_per_depth = {depth+1: (self.worst_fitness, None, None) for depth in range(self.max_depth)}
@@ -338,7 +347,7 @@ class Configurator:
         sy2 = [sp.symbols(f"x{i}") for i in range(n2)]
         sy3 = [sp.symbols(f"v{j}") for j in range(n3)]
         self.symbols = sy2 + sy3
-        for sym in sy2 + sy3:
+        for sym in self.symbols:
             pset.addTerminal(sym, name=str(sym))
 
         # Add ephemeral constant generator
@@ -411,8 +420,17 @@ class Configurator:
             warnings.warn("Model not fitted yet")
             return
 
-        print(f"Best depth={self.best_depth} fitness={self.best_per_depth[self.best_depth][0]} ; expr={self.best_expr}")
+        print(f'Best depth={self.best_depth}', end='\n\n')
 
         # Print all expressions and loss per depth
         for depth, (fitness, expr, ind) in self.best_per_depth.items():
-            print(f"Depth={depth} fitness={fitness:.2f} ; expr={expr}")
+            """print(f"Depth={depth} fitness={fitness:.2f} expr:", end='\n\n')
+            display(Math(sp.latex(sp.sympify(round_ind(expr), locals=self.operators.map))))
+            print('\n\n')"""
+
+            sym_expr = sp.sympify(expr, locals=self.operators.map)
+            sym_expr = _round_floats(sym_expr)
+            sym_expr = sym_expr.evalf(2)
+            tex = sp.latex(sym_expr.subs(self.subs))
+            display(Math(f"\\text{{Depth={depth} (fit={fitness:.2f})}}\\quad {tex}"))
+            print('')

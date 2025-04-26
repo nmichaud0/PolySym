@@ -8,7 +8,7 @@ import copy
 from deap import gp
 from torch import Tensor
 import sympy as sp
-
+import re
 
 class _RandConst:
     """Pickleable constant‐generator with per‐instance bounds."""
@@ -35,6 +35,20 @@ def get_logger(name: str = "polysym", level: int = logging.INFO) -> logging.Logg
     logger.setLevel(level)
     return logger
 
+def _round_floats(expr: sp.Expr, ndigits: int = 2) -> sp.Expr:
+    """
+    Walk the expression and replace every Float literal
+    with a rounded version to `ndigits` decimals.
+    """
+    # collect all Float atoms
+    old_floats = list(expr.atoms(sp.Float))
+    # build a mapping old→new
+    repl = {
+        f: sp.Float(round(float(f), ndigits), ndigits)
+        for f in old_floats
+    }
+    # do the replacement in one go
+    return expr.xreplace(repl)
 
 @cache
 def compile_tree(expr_str: str, pset) -> Callable:
