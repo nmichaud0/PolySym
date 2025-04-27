@@ -16,7 +16,7 @@ class _RandConst:
         self.min_c = min_c
         self.max_c = max_c
     def __call__(self) -> float:
-        return random.uniform(self.min_c, self.max_c)
+        return round(random.uniform(self.min_c, self.max_c), 3)
 
 def seed_everything(seed: int) -> None:
     random.seed(seed)

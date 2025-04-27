@@ -1,5 +1,5 @@
 from polysym.evaluation import rmse, mse
-from polysym.torch_operators import Operators
+from polysym.torch_operators_2 import Operators
 from polysym.utils import (seed_everything,
                            get_logger,
                            _RandConst,
@@ -85,12 +85,15 @@ class Configurator:
 
         self.scale = scale
 
+        assert type(labels_2d) == type(labels_3d), f'If setting labels, must set both for 3d and 2d inputs, got types {type(labels_2d)=}, {type(labels_3d)=}'
+
         self.labels_3d = labels_3d
         self.labels_2d = labels_2d
         self.labels = labels_2d + labels_3d if labels_2d is not None else None
 
-        assert self.X3d.shape[1] == len(self.labels_3d)
-        assert self.X2d.shape[1] == len(self.labels_2d)
+        if labels_2d is not None:
+            assert self.X3d.shape[1] == len(self.labels_3d)
+            assert self.X2d.shape[1] == len(self.labels_2d)
 
         self.min_constant = min_max_constants[0]
         self.max_constant = min_max_constants[1]
@@ -165,7 +168,6 @@ class Configurator:
         if self.labels is not None:
             for var_sym, label in zip(self.symbols, self.labels):
                 self.subs[var_sym] = sp.symbols(label)
-
 
         self.best_per_depth = {}
         self.best_per_depth = {depth+1: (self.worst_fitness, None, None) for depth in range(self.max_depth)}

@@ -1,6 +1,6 @@
 import torch
 # from PolySym import Regressor, Operators
-from polysym.torch_operators import Operators
+from polysym.torch_operators_2 import Operators
 from polysym.regressor import Configurator
 from polysym.model import PolySymModel
 from polysym.evaluation import r2
@@ -29,7 +29,7 @@ for obs in range(n_obs):
     y1d[obs] = torch.mean(y).item()
     y2d[obs] = y
 
-operators = Operators(['add', 'sub', 'mul', 'div', 'neg'])
+operators = Operators(['add', 'sub', 'mul', 'div', 'neg', 'mean'])
 
 model = PolySymModel(X3d=X3d,
                         X2d=X2d,
@@ -39,11 +39,18 @@ model = PolySymModel(X3d=X3d,
                         max_complexity=6,
                         pop_size=300,
                         stopping_criterion=.9,
-                        max_iter=5,
+                        max_iter=50,
                         fitness_fn = r2,
                         fitness_obj = 1,
                         seed=42,
                         verbose=1,
+                        optimize_ephemerals=False,
                         workers=1)
 
+import multiprocessing as mp
+
+mp.set_start_method('fork', force=True)
+
 model.fit()
+
+model.summary(pretty_print=False)
