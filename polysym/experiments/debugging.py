@@ -33,7 +33,7 @@ operators = Operators(['add', 'sub', 'mul', 'div', 'neg', 'mean'])
 
 model = PolySymModel(X3d=X3d,
                         X2d=X2d,
-                        y=y2d,
+                        y=y1d,
                         operators=operators,
                         min_complexity=4,
                         max_complexity=6,

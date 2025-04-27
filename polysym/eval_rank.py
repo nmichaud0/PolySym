@@ -30,35 +30,6 @@ class TreeNode:
         self.children = []
 
 
-class TreeNode2:
-    def __init__(self, name, children=None):
-        self.name     = name           # e.g. "binary_add" or "v0" or "3.14"
-        self.children = children or [] # list of TreeNode
-
-    def __repr__(self):
-        if not self.children:
-            return self.name
-        args = ", ".join(repr(c) for c in self.children)
-        return f"{self.name}({args})"
-
-# ────────── tokenizer ──────────
-_TOKEN_RE = re.compile(r"""
-    (?P<NAME>[A-Za-z_]\w*)     |   # identifiers: unary_add, x0, v1, etc
-    (?P<NUMBER>-?\d+(\.\d+)?)  |   # numeric literals
-    (?P<LPAR>\()               |   # left paren
-    (?P<RPAR>\))               |   # right paren
-    (?P<COMMA>,)                   # comma
-""", re.VERBOSE)
-
-def tokenize(s):
-    for m in _TOKEN_RE.finditer(s):
-        kind = m.lastgroup
-        val  = m.group()
-        yield kind, val
-    yield None, None  # sentinel
-
-
-
 def build_tree(ind):
     it = iter(ind)
 
@@ -98,12 +69,79 @@ def infer_vectorality(node: TreeNode) -> bool:
         return False
     return any(child_vecs)
 
-def is_valid_tree(ind, objective):
+def old2is_valid_tree(ind, objective):
 
     root = build_tree(ind)
     out_is_vec = infer_vectorality(root)
     need_vec = objective == 2
     return out_is_vec == need_vec
+
+
+def is_valid_tree(individual: gp.PrimitiveTree, objective_dim: int) -> bool:
+    """
+    • A **reducer** (mean, median, cov, …) is ONLY legal on R2 inputs and
+      always returns R1.  Applying a reducer on a scalar is rejected, which
+      prevents the accidental creation of dim-0 tensors produced by stacked
+      reductions.
+    • Element-wise binary ops obey broadcastability:
+           R2 ⊕ R1   →  ✗  (forbidden)
+           R2 ⊕ R2   →  R2
+           R1 ⊕ R1   →  R1
+           R0        →  broadcasts with anything
+    • Final rank must equal the learning objective:
+           objective_dim == 2  →  want R2
+           objective_dim == 1  →  want R1
+    """
+    if objective_dim not in (1, 2):
+        raise ValueError("objective_dim must be 1 or 2")
+
+    stk = []
+
+    for node in reversed(individual):              # post-order over prefix list
+        if node.arity == 0:                        # ─── terminals
+            stk.append(_terminal_rank(node))
+            continue
+
+        if len(stk) < node.arity:                 # malformed GP expression
+            return False
+
+        # ─── UNARY ───────────────────────────────────────────────────
+        if node.arity == 1:
+            child = stk.pop()
+            op_name = node.name[6:]               # drop 'unary_'
+            if op_name in UNARY_REDUCE:           # --- reducer ---
+                if child != R2:                   # reducer on scalar ⇒ invalid
+                    return False
+                stk.append(R1)
+            else:                                 # element-wise unary
+                stk.append(child)
+            continue
+
+        # ─── BINARY (arity == 2) ────────────────────────────────────
+        right, left = stk.pop(), stk.pop()
+        op_name = node.name[7:]                   # drop 'binary_'
+
+        if op_name in BINARY_REDUCE:              # statistical reducer
+            if left != R2 or right != R2:
+                return False
+            stk.append(R1)
+            continue
+
+        # element-wise binary broadcasting rules
+        if R0 in (left, right):                   # constants broadcast
+            stk.append(right if left == R0 else left)
+        elif left == right:                       # R1+R1 or R2+R2
+            stk.append(left)
+        else:                                     # R1 ⊕ R2 is illegal
+            return False
+
+    # exactly one rank (root) must remain
+    if len(stk) != 1:
+        return False
+
+    root_rank = stk[0]
+    target_rank = R2 if objective_dim == 2 else R1
+    return root_rank == target_rank
 
 _UNARY_IS_REDUCER  = {f"unary_{k}"  for k in UNARY_REDUCE}
 _BINARY_IS_REDUCER = {f"binary_{k}" for k in BINARY_REDUCE}
