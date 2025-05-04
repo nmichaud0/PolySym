@@ -9,6 +9,8 @@ from deap import gp
 from torch import Tensor
 import sympy as sp
 import re
+import warnings
+import math
 
 class _RandConst:
     """Pickleable constant‐generator with per‐instance bounds."""
@@ -57,6 +59,15 @@ def compile_tree(expr_str: str, pset) -> Callable:
     """
     tree = gp.PrimitiveTree.from_string(expr_str, pset)
     return gp.compile(expr=tree, pset=pset)
+
+
+def compile_tree2(ind, pset) -> Callable:
+    try:
+        func = gp.compile(expr=ind, pset=pset)
+        return func
+    except Exception as e:
+        print(ind, e)
+        raise Exception(e)
 
 
 def _hill_climb_constants(ind, inputs, pset, fitness_fn, y,
@@ -150,8 +161,7 @@ def _evaluate_worker(ind,
                      fitness_obj,
                      threshold,
                      opt_steps,
-                     opt_sigma,
-                     ngsa_alpha):
+                     opt_sigma):
     """
     Multiprocessing implementation
 
@@ -161,45 +171,62 @@ def _evaluate_worker(ind,
 
     """
     # func = gp.compile(expr=ind, pset=pset)
-    func = compile_tree(str(ind), pset)
+    #func = compile_tree(str(ind), pset)
+    func = compile_tree2(ind, pset)
 
     raw = func(*inputs)
 
     dimensionality_mismatch = raw.dim() != objective
 
+    """if not all(raw.isnan().flatten() == inputs[1].isnan().flatten()):
+        warnings.warn(f'Individual {str(ind)} produces mismatching nan values')"""
+
+    if objective == 2:
+        nan_mismatch = not all(raw.isnan().flatten() == inputs[1].isnan().flatten())
+    else:
+        if dimensionality_mismatch:
+            nan_mismatch = True
+        else:
+            nan_mismatch = any(raw.isnan())
+
+
     # Do we have ephemerals ?
     eph = bool([v for _, v in _extract_ephemerals(ind)])
 
-    fitness = worst_fitness if dimensionality_mismatch else fitness_fn(raw, y)
+    fitness = worst_fitness if dimensionality_mismatch or nan_mismatch else fitness_fn(raw, y)
+
+    if math.isnan(fitness):
+        warnings.warn(f'Found fitness of nan in ind {str(ind)}')
 
     if fitness_obj == -1:
         do_opt = fitness <= threshold
     else:
         do_opt = fitness > threshold
 
-    if not eph or not optimize_ephemerals or not do_opt or dimensionality_mismatch:
-        if fitness != worst_fitness:
-
-            if fitness_obj == -1:
-                fitness += ngsa_alpha * ind.height
-            else:
-                fitness -= ngsa_alpha * ind.height
+    if not eph or not optimize_ephemerals or not do_opt or dimensionality_mismatch or nan_mismatch:
 
         return fitness, dimensionality_mismatch, False, ind
 
-    ephemerals, better_fit, better_ind = _hill_climb_constants_ls(ind, hill_inputs, pset, fitness_fn, y_hill, objective, worst_fitness, steps=opt_steps, sigma=opt_sigma)
+    ephemerals, better_fit, better_ind = _hill_climb_constants_ls(ind,
+                                                                  hill_inputs,
+                                                                  pset,
+                                                                  fitness_fn,
+                                                                  y_hill,
+                                                                  objective,
+                                                                  worst_fitness,
+                                                                  steps=opt_steps,
+                                                                  sigma=opt_sigma)
 
     if fitness_obj == -1:
         # if opt failed
         if better_fit > fitness:
             better_fit = fitness
             better_ind = ind
-        better_fit += ngsa_alpha * better_ind.height #better_ind.height
+
     else:
         if better_fit < fitness:
             better_fit = fitness
             better_ind = ind
-        better_fit -= ngsa_alpha * better_ind.height
 
     return better_fit, dimensionality_mismatch, True, better_ind
 
@@ -223,7 +250,8 @@ def _hill_climb_constants_ls(ind, inputs, pset, fitness_fn, y,
     # Evaluate original output
     tmp = copy.deepcopy(ind)
     tmp = _apply_ephemerals(tmp, best_vals.tolist(), eph)
-    func = compile_tree(str(tmp), pset)
+    #func = compile_tree(str(tmp), pset)
+    func = compile_tree2(tmp, pset)
     out0 = func(*inputs)
     if out0.dim() != objective:
         return best_vals.tolist(), worst_fitness, ind
@@ -243,7 +271,8 @@ def _hill_climb_constants_ls(ind, inputs, pset, fitness_fn, y,
         vals[j] += eps
         tmpj = copy.deepcopy(ind)
         tmpj = _apply_ephemerals(tmpj, vals.tolist(), eph)
-        funcj = compile_tree(str(tmpj), pset)
+        #funcj = compile_tree(str(tmpj), pset)
+        funcj = compile_tree2(tmpj, pset)
         outj = funcj(*inputs).detach().cpu().numpy().reshape(-1)
         J[:, j] = (outj - out0_flat) / eps
 
@@ -261,15 +290,19 @@ def _hill_climb_constants_ls(ind, inputs, pset, fitness_fn, y,
         # Matrix is singular or ill-conditioned: skip update
         return best_vals.tolist(), worst_fitness, ind
 
-    new_vals = best_vals + delta
+    new_vals = [v + d if not math.isnan(d) else v for v, d in zip(best_vals, delta)]
     # Evaluate new fitness
     tmpn = copy.deepcopy(ind)
-    tmpn = _apply_ephemerals(tmpn, new_vals.tolist(), eph)
-    funcn = compile_tree(str(tmpn), pset)
+    tmpn = _apply_ephemerals(tmpn, new_vals, eph)
+    #funcn = compile_tree(str(tmpn), pset)
+    funcn = compile_tree2(tmpn, pset)
     outn = funcn(*inputs)
     fitn = worst_fitness if outn.dim() != objective else fitness_fn(outn, y)
 
-    return new_vals.tolist(), fitn, tmpn
+    if any(math.isnan(i) for i in new_vals):
+        raise ValueError('Jacobian Optimization provided a nan ephemeral value')
+
+    return new_vals, fitn, tmpn
 
 
 

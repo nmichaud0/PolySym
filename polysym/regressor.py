@@ -10,6 +10,7 @@ from polysym.utils import (seed_everything,
                            scale_data,
                            _round_floats)
 from polysym.eval_rank import is_valid_tree
+from polysym.halloffame import HallOfFame
 import sympy as sp
 import torch
 from torch import Tensor
@@ -25,14 +26,40 @@ import random
 import multiprocessing as _mp
 import numpy as np
 from IPython.display import display, Math
+from functools import partial
 
-try:
+"""try:
     # On Linux switch to `spawn` exactly once.
     if _mp.get_start_method(allow_none=True) != 'spawn':
         _mp.set_start_method('spawn', force=True)
 except RuntimeError:
     # start‑method was already set by the host programme – ignore
-    pass
+    pass"""
+
+# SETUP GP PICKABLE FUNCTIONS
+def _eval_wrap(ind, evaluate_worker, extra_args):
+    return evaluate_worker(ind, *extra_args)
+
+def _tree_str(self):
+    if not hasattr(self, '_cached_str'):
+        self._cached_str = super(self.__class__, self).__str__()
+    return self._cached_str
+
+def _str(self):
+    return self._tree_str()
+
+def _eq(self, other):
+    return isinstance(other, self.__class__) and self.tree_str == other.tree_str
+
+def _hash(self):
+    return hash(self.tree_str)
+
+# TODO: MP population generation
+# TODO: check kl-div/ccc perfs of metrics --> goal is to get how far we're and R^2 might lack resolution; or take only dyads of r^2 that are already alike
+
+class Scalar: pass
+class Vector: pass
+
 
 class Configurator:
     def __init__(self, X3d: Tensor,
@@ -43,12 +70,12 @@ class Configurator:
                        max_iter: int = 1000,
                        rerun_iter: int = 10,
                        scale: bool = False,
-                       stopping_criterion: Union[float, bool]=False,
                        labels_3d: list[str] = None,
                        labels_2d: list[str] = None,
                        min_max_constants: tuple[int, int] = (-100, 100),
                        opt_sigma: float = .2,
                        opt_steps: int = 100,
+                       add_constants: bool = False,
                        optimize_ephemerals: bool = True,
                        operators: Operators = None,
                        fitness_fn: Callable = rmse,
@@ -57,7 +84,6 @@ class Configurator:
                        tournament_size: int = 3,
                        cxpb: float = .5,
                        mutpb: float = .2,
-                       ngsa2_alpha: float=.01,
                        seed: Union[int, None] = None,
                        verbose: int = 0,
                        workers: int = -1
@@ -68,6 +94,10 @@ class Configurator:
         self.y = y
         self.norm_stats = None
 
+        if self.y.dim() == 2:
+            assert self.X3d.shape[2] == self.y.shape[1], (f'Time dimensions mut be equal between X and y: '
+                                                          f'X3d:{self.X3d.shape[2]} ; y:{self.y.shape[1]}')
+
         if scale:
             self.X3d, self.X2d, self.y, self.norm_stats = scale_data(X3d, X2d, y)
 
@@ -77,9 +107,6 @@ class Configurator:
         assert self.max_depth >= self.min_depth, f'Max complexity must be heigher or equal to min complexity, got: {self.max_depth}'
 
         self.max_iter = max_iter
-        self.stopping_criterion = stopping_criterion
-        if (not isinstance(self.stopping_criterion, float)) and (not (self.stopping_criterion is False)):
-            raise ValueError(f"stoping criterion must be either float or False, got: {stopping_criterion}")
 
         self.rerun_iter = rerun_iter
 
@@ -100,17 +127,26 @@ class Configurator:
         self.opt_sigma = opt_sigma * (self.max_constant - self.min_constant)
         self.opt_steps = opt_steps
 
+        self.add_constants = add_constants
         self.optimize_ephemerals = optimize_ephemerals
+
+        if not self.add_constants:
+            assert self.optimize_ephemerals is False, (f'Constants cannot be optimized if none are added:\n'
+                                                       f'\tIf add_constants is False, optimize_ephemerals '
+                                                       f'cannot be True.')
 
         self.fitness_fn = fitness_fn
         self.fitness_obj = fitness_obj
+
+        self.threshold = 1e6 * -self.fitness_obj
+        self.percentile = 30 if self.fitness_obj == -1 else 70
+
         self.worst_fitness = float('-inf') if fitness_obj == 1 else float('inf')
         self.pop_size = pop_size
         self.hof_size = pop_size // 4  # 25% hof size
         self.tournament_size = tournament_size
         self.cxpb = cxpb
         self.mutpb = mutpb
-        self.ngsa2_alpha = ngsa2_alpha
         self.seed = seed
         self.verbose = verbose
         self.workers = workers
@@ -127,8 +163,9 @@ class Configurator:
         else:
             self.operators = operators
 
-        # If y has 3dim then get vector output else scalar
-        self.objective = y.dim()
+        self.objective = y.dim()  # Is either 1 or 2 ; scalar or vector output
+        self.ret_type = Vector if self.objective == 2 else Scalar
+        self.V, self.S = Vector, Scalar
 
         self.n_obs = X3d.shape[0]
 
@@ -160,16 +197,15 @@ class Configurator:
 
         self.y_hill = self.y[:idx_20p]
 
-        self.pset = self._build_primitives()
+        self.pset = self._build_primitives_constrained()
         self.toolbox = self._setup_gp()
-        self.hof = tools.HallOfFame(maxsize=self.hof_size)
+        self.hof = HallOfFame(maxsize=self.hof_size, objective=self.fitness_obj)
 
         self.subs = {}
         if self.labels is not None:
             for var_sym, label in zip(self.symbols, self.labels):
                 self.subs[var_sym] = sp.symbols(label)
 
-        self.best_per_depth = {}
         self.best_per_depth = {depth+1: (self.worst_fitness, None, None) for depth in range(self.max_depth)}
         self.all_depths = list(range(self.max_depth))
         self.best_expr = None
@@ -194,11 +230,19 @@ class Configurator:
 
         self.logger = get_logger(level=level)
 
-        self.threshold = 1e6 * -self.fitness_obj
-        self.percentile = 30 if self.fitness_obj == -1 else 70
 
     def validate(self, ind):
-        return is_valid_tree(ind, self.objective)
+
+        constants_count = 0
+        terminal_counts = 0
+
+        for node in ind:
+            if isinstance(node, gp.Terminal):
+                if node.name == 'randc':
+                    constants_count += 1
+                terminal_counts += 1
+
+        return constants_count != terminal_counts  # if all terminals are constants, tree not valid
 
     def compare_func(self, a, b):
 
@@ -259,10 +303,27 @@ class Configurator:
         if "Fitness" not in creator.__dict__:
             creator.create("Fitness", base.Fitness, weights=(float(self.fitness_obj),))
         if "Individual" not in creator.__dict__:
-            creator.create("Individual", gp.PrimitiveTree, fitness=creator.Fitness, dim_mismatch=None)
+            creator.create("Individual",
+                           gp.PrimitiveTree,
+                           fitness=creator.Fitness,
+                           dim_mismatch=None,
+                           __str__ = _str,
+                           __eq__=_eq,
+                           __hash__=_hash,
+                           _tree_str=_tree_str)
+
+        def gen_expr(pset, min_, max_, type_=None):
+            """Generate an expression that doesn't contain only ephemerals"""
+            if type_ is None:
+                type_ = pset.ret
+            while True:
+                expr = gp.genHalfAndHalf(pset, min_, max_, type_=type_)
+                if any(isinstance(n, gp.Terminal) and n.name != 'randc' for n in expr):
+                    return expr
+
 
         tb = base.Toolbox()
-        tb.register('expr_init', gp.genHalfAndHalf, pset=self.pset, min_=self.min_depth, max_=self.max_depth)
+        tb.register('expr_init', gen_expr, pset=self.pset, min_=self.min_depth, max_=self.max_depth)
         tb.register("individual", tools.initIterate, creator.Individual, tb.expr_init)
         tb.register("population", tools.initRepeat, list, tb.individual)
 
@@ -286,7 +347,7 @@ class Configurator:
         for d in range(1, self.max_depth+1):
             tb.register(
                 f'expr_depth_{d}',
-                gp.genHalfAndHalf,
+                gen_expr,
                 pset = self.pset,
                 min_=d, max_=d
             )
@@ -305,14 +366,14 @@ class Configurator:
                 getattr(tb, f'individual_depth_{d}')
             )
 
-            tb.decorate(f'population_depth_{d}', _wrap_population)
+            # tb.decorate(f'population_depth_{d}', _wrap_population)
 
         tb.register('clone', copy.deepcopy)
 
         tb.register('mutate', gp.mutUniform, expr=tb.expr_init, pset=self.pset)
 
         # tb.register("evaluate", _evaluate)
-        tb.register('evaluate', lambda ind: _evaluate_worker(ind,
+        """tb.register('evaluate', lambda ind: _evaluate_worker(ind,
                                                              self.inputs,
                                                              self.hill_inputs,
                                                              self.pset,
@@ -326,7 +387,14 @@ class Configurator:
                                                              self.threshold,
                                                              self.opt_steps,
                                                              self.opt_sigma,
-                                                             self.ngsa2_alpha))
+                                                             self.ngsa2_alpha))"""
+
+        extra = (self.inputs, self.hill_inputs, self.pset, self.fitness_fn, self.y, self.y_hill, self.worst_fitness,
+                 self.objective, self.optimize_ephemerals, self.fitness_obj, self.threshold, self.opt_steps,
+                 self.opt_sigma)
+        eval_fn = partial(_eval_wrap, evaluate_worker=_evaluate_worker,
+                          extra_args=extra)
+        tb.register('evaluate', eval_fn)
 
         tb.register("select", tools.selTournament, tournsize=self.tournament_size)
         tb.register("mate", gp.cxOnePoint)
@@ -374,6 +442,65 @@ class Configurator:
 
         # Update arguments list so compile sees only variable names
         pset.arguments = [str(v) for v in sy2 + sy3]
+
+        return pset
+
+    def _build_primitives_constrained(self):
+
+        n2, n3 = self.X2d.shape[1], self.X3d.shape[1]
+
+        arg_types = [self.S] * n2 + [self.V] * n3
+
+        pset = gp.PrimitiveSetTyped("MAIN", arg_types, self.ret_type)
+
+        s2, s3 = [sp.symbols(f'x{i}') for i in range(n2)], [sp.symbols(f'v{i}') for i in range(n3)]
+
+
+        self.symbols = s2 + s3
+
+        # pset.renameArguments(**{f"ARG{i}": i for i in self.symbols})
+        for ret_type, terms in pset.terminals.items():
+
+            prefix = 'x' if ret_type.__name__ == 'Scalar' else 'v'
+
+            for i, term in enumerate(terms):
+                pset.terminals[ret_type][i].name = f'{prefix}{i}'
+                pset.terminals[ret_type][i].value = f'{prefix}{i}'
+
+
+        if self.add_constants:
+            pset.addEphemeralConstant("randc", _RandConst(self.min_constant, self.max_constant), self.S)
+
+        pset.arguments = [str(i) for i in self.symbols] # check this makes break
+
+
+        for name, (fn, _, rank) in self.operators.unary_nonreduce.items():
+            if name in self.operators.unary_reduce:
+                continue
+            if rank in (0, 1):
+                pset.addPrimitive(fn, [self.S], self.S, name=name)
+            if rank in (0, 2):
+                pset.addPrimitive(fn, [self.V], self.V, name=name)
+
+        for name, (fn, _, _) in self.operators.unary_reduce.items():
+            pset.addPrimitive(fn, [self.V], self.S, name=name)
+
+        for name, (fn, _, rank) in self.operators.binary_nonreduce.items():
+
+            if name in self.operators.binary_reduce:
+                continue
+
+            pset.addPrimitive(fn, [self.S, self.S], self.S, name=name)
+            pset.addPrimitive(fn, [self.S, self.V], self.V, name=name)
+            pset.addPrimitive(fn, [self.V, self.S], self.V, name=name)
+            pset.addPrimitive(fn, [self.V, self.V], self.V, name=name)
+
+        for name, (fn, _, _) in self.operators.binary_reduce.items():
+            pset.addPrimitive(fn, [self.V, self.V], self.S, name=name)
+
+        #del pset.context['__builtins__']
+        pset.context.pop('__builtins__', None)
+        pset.mapping = {v.name: v for v in pset.mapping.values()}
 
         return pset
 
