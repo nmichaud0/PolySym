@@ -35,4 +35,6 @@ class HallOfFame:
     def __getitem__(self, item):
         return self.items[item]
 
+    def __len__(self):
+        return len(self.items)
 

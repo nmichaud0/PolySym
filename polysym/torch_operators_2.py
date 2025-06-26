@@ -108,6 +108,7 @@ def safe_sqrt(x: Tensor):
 def safe_square(x: Tensor):
     return x ** 2
 
+# TODO: log don't do abs. replace all <= 0 by EPS
 def safe_log(x: Tensor):
     """log(|x|+ε) or log10(|x|+ε)."""
     x_safe = x.abs() + EPS

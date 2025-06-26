@@ -1,4 +1,4 @@
-from polysym.evaluation import rmse, mse
+from polysym.evaluation import rmse, mse, r2
 from polysym.torch_operators_2 import Operators
 from polysym.utils import (seed_everything,
                            get_logger,
@@ -27,6 +27,8 @@ import multiprocessing as _mp
 import numpy as np
 from IPython.display import display, Math
 from functools import partial
+from hashlib import blake2b
+from collections import defaultdict
 
 """try:
     # On Linux switch to `spawn` exactly once.
@@ -52,7 +54,10 @@ def _eq(self, other):
     return isinstance(other, self.__class__) and self.tree_str == other.tree_str
 
 def _hash(self):
-    return hash(self.tree_str)
+    return hash(str(self))
+
+def hash_key(ind):
+    return blake2b(str(ind).encode(), digest_size=8).digest()
 
 # TODO: MP population generation
 # TODO: check kl-div/ccc perfs of metrics --> goal is to get how far we're and R^2 might lack resolution; or take only dyads of r^2 that are already alike
@@ -76,10 +81,10 @@ class Configurator:
                        opt_sigma: float = .2,
                        opt_steps: int = 100,
                        add_constants: bool = False,
-                       optimize_ephemerals: bool = True,
+                       optimize_ephemerals: bool = False,
                        operators: Operators = None,
-                       fitness_fn: Callable = rmse,
-                       fitness_obj: Literal[-1, 1] = -1,
+                       fitness_fn: Callable = r2,
+                       fitness_obj: Literal[-1, 1] = 1,
                        pop_size: int = 100,
                        tournament_size: int = 3,
                        cxpb: float = .5,
@@ -186,10 +191,6 @@ class Configurator:
         for i in range(self.X2d.shape[1]):
             self.inputs.append(self.X2d[:, i].share_memory_())
             self.hill_inputs.append(self.X2d[:idx_20p, i].share_memory_())
-        """for i in range(self.X2d.shape[1]):
-            x = self.X2d[:, i].unsqueeze(1).expand(-1, T)
-            self.inputs.append(x.share_memory_())
-            self.hill_inputs.append(x[:idx_20p].share_memory_())"""
 
         for i in range(self.X3d.shape[1]):
             self.inputs.append(self.X3d[:, i, :].share_memory_())
@@ -217,6 +218,8 @@ class Configurator:
         self.depth_weights = {d: 2 ** (d-self.min_depth) for d in range(1, self.max_depth+1)}
         self.depth_quota = self._compute_depth_quota(self.pop_size)
 
+        self.archive = defaultdict(list)
+
         if self.verbose == 0:
             level = logging.NOTSET
         elif self.verbose == 1:
@@ -230,6 +233,13 @@ class Configurator:
 
         self.logger = get_logger(level=level)
 
+    def is_new(self, ind):
+        h = hash_key(ind)
+        for pickled in self.archive[h]:
+            if pickled == str(ind):
+                return False
+        self.archive[h].append(str(ind))
+        return True
 
     def validate(self, ind):
 
@@ -269,14 +279,31 @@ class Configurator:
             counts[np.argmin(w)] -= 1
         return dict(zip(self.depth_weights, counts))
 
-    def _make_individuals(self, depth: int, n: int=1):
+    def _make_individuals(self, depth: int, n: int=1, max_retry: int=25):
 
+        # Old method produces lots of already seen individuals
         pop_fn = getattr(self.toolbox, f'population_depth_{depth}')
         return pop_fn(n=n)
 
+        pop_fn = getattr(self.toolbox, f'population_depth_{depth}')
+        uniques = []
+        i = 0
+        while len(uniques) < n:
+            npop = pop_fn(n=n)
+            uniques.extend([ind for ind in npop if self.is_new(ind)])
+
+            if i > max_retry:
+                uniques.extend(pop_fn(n=len(uniques)-n))
+                break
+
+            i += 1
+
+        return uniques[:n]
+
     def _balanced_population(self, n: int):
         pop = []
-        for depth, k in self.depth_quota.items():
+        depth_quota = self._compute_depth_quota(n)
+        for depth, k in depth_quota.items():
             pop.extend(self._make_individuals(depth, k))
         random.shuffle(pop)
         return pop
@@ -297,6 +324,45 @@ class Configurator:
 
         random.shuffle(keep)
         return keep[:self.pop_size]
+
+    def _rebalance2(self, pop: list):
+        counts = {d: 0 for d in self.depth_quota}
+        # depth: count, pop, fitnesses
+        per_depth = {d: (c, [], []) for d, c in self.depth_quota.items()}
+
+        for ind in pop:
+            depth = ind.height
+            per_depth[depth][1].append(ind)
+            if not isinstance(ind.fitness, float):
+                ind.fitness = self.worst_fitness
+            per_depth[depth][2].append(ind.fitness)
+
+        keep = []
+        for d, (c, d_pop, fits) in per_depth.items():
+
+            # too much
+            if len(d_pop) > c:
+                # sort by fitness and remove all worsts
+                sorted_fits = np.argsort(fits)
+                if self.fitness_obj == 1:
+                    sorted_fits = reversed(sorted_fits)
+
+                sorted_pop = [d_pop[i] for i in sorted_fits]
+
+                keep.extend(sorted_pop[:c])
+
+            elif len(d_pop) < c:
+                # add new individuals
+                deficit = c - len(d_pop)
+                new_pop = self._make_individuals(d, deficit)
+                keep.extend(d_pop + new_pop)
+            else:
+                keep.extend(d_pop)
+
+        random.shuffle(keep)
+        return keep
+
+
 
     def _setup_gp(self):
 

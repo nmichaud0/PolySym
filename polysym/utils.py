@@ -181,8 +181,8 @@ def _evaluate_worker(ind,
     """if not all(raw.isnan().flatten() == inputs[1].isnan().flatten()):
         warnings.warn(f'Individual {str(ind)} produces mismatching nan values')"""
 
-    if objective == 2:
-        nan_mismatch = not all(raw.isnan().flatten() == inputs[1].isnan().flatten())
+    if objective == 2 and not dimensionality_mismatch:
+        nan_mismatch = not all(raw.isnan().flatten() == inputs[-1].isnan().flatten())
     else:
         if dimensionality_mismatch:
             nan_mismatch = True
@@ -196,7 +196,8 @@ def _evaluate_worker(ind,
     fitness = worst_fitness if dimensionality_mismatch or nan_mismatch else fitness_fn(raw, y)
 
     if math.isnan(fitness):
-        warnings.warn(f'Found fitness of nan in ind {str(ind)}')
+        # warnings.warn(f'Found fitness of nan in ind {str(ind)}')
+        pass
 
     if fitness_obj == -1:
         do_opt = fitness <= threshold

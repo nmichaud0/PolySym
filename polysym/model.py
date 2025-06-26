@@ -70,6 +70,10 @@ class PolySymModel(Configurator):
                         idx_map[len(to_eval)] = idx
                         to_eval.append(ind)
 
+                #print(f'New individuals proportion = {len(to_eval)}/{len(pop)}')
+                #if len(pop) != self.pop_size:
+                #    print(f'Evaluation size: {len(pop)} ; expected size = {self.pop_size}')
+
                 # Evaluate uncached individuals
                 if to_eval:
                     if self.workers == 1:
@@ -93,10 +97,11 @@ class PolySymModel(Configurator):
                             for ind in to_eval
                         ]
                         out = pool.starmap(_evaluate_worker, args)
-                        # store in cache
-                        for ind, r in zip(to_eval, out):
-                            key = ind.tree_str if hasattr(ind, 'tree_str') else str(ind)
-                            self.cache[key] = r
+
+                    # store in cache
+                    for ind, r in zip(to_eval, out):
+                        key = ind.tree_str if hasattr(ind, 'tree_str') else str(ind)
+                        self.cache[key] = r
 
                     # Fill results in original order
                     for i, res in enumerate(out):
@@ -116,6 +121,7 @@ class PolySymModel(Configurator):
             while ind_dim_mismatch:
 
                 for i in range(max_iter):
+
                     self.pop_refresh += 1
 
                     ## CHANGE MUTATION/CROSSOVER PROBS each 10 iter
@@ -183,6 +189,7 @@ class PolySymModel(Configurator):
                                 raise ValueError('Found mismatch in best_per_depth')"""
 
                     pop = [pop[i] for i in range(len(pop)) if i not in nan_fitnesses]
+                    fitnesses = [fitnesses[i] for i in range(len(fitnesses)) if i not in nan_fitnesses]
                     #print(f'Found {(sum(dim_mismatches)/self.pop_size)*100:.2f}% of nan mismatch')
 
                     self.update_differential_loss(pop)
@@ -191,8 +198,18 @@ class PolySymModel(Configurator):
                     self.losses.append(self.best_func(self.losses + [best_fit]))
 
                     finite = np.asarray(fitnesses)[np.isfinite(fitnesses)]
-                    self.threshold = np.percentile(finite, self.percentile)
+
+                    # All same, no need to change threshold
+                    if min(fitnesses) != max(fitnesses):
+                        self.threshold = np.percentile(finite, self.percentile)
+
                     self.hof.update(pop)
+
+                    # ONLY EXPERIMENTAL:
+                    # TODO: REMOVE
+                    if max(fitnesses) == 1:
+                        print('FOUND PERFECT R2... STOPPING ITERATIONS')
+                        break
 
                     # GENERATE NEW POPULATION
 
@@ -211,29 +228,36 @@ class PolySymModel(Configurator):
                         pop =  offsprings[:self.pop_size]
                         self.logger.info(f'No improvements for 100 generations – population refresh')
                         self.pop_refresh = 0
+                        # TODO: Fix stuff here (why keep hof at each gen ?)
+                        # TODO: Every new generation must only contain new individuals // check if it messes with variations ?
 
                     else:
                         # 10% of hof size max + 10% of new population
-                        hof_size_p10 = int(self.hof_size*.1)
-                        pop_size_p90 = int(self.pop_size*1.1) # small overshoot to keep pop size identical
+                        # hof_size_p10 = int(self.hof_size*.1)
+                        # pop_size_p90 = int(self.pop_size*1.1) # small overshoot to keep pop size identical
 
-                        parents = tools.selTournament(pop, k=pop_size_p90-hof_size_p10 , tournsize=self.tournament_size)
+                        parents = tools.selTournament(pop, k=int(self.pop_size*.5) , tournsize=self.tournament_size)
+                        # parents = tools.selTournament(pop, k=self.pop_size, tournsize=self.tournament_size)
 
                         # Get 10% of all best individuals to make variations on
                         # parents += 2 * self.hof.items[:hof_size_p10]
                         random.shuffle(parents)
 
-                        offsprings = self._variation(parents)
+                        offsprings = self._variation(parents + self.hof[:len(self.hof)//2])
+
+                        #unique_novels = [o for o in offsprings if o not in self.cache]
+                        #deficit = self.pop_size - len(unique_novels)
 
                         # add new individuals
                         # new_pop = self.toolbox.population(n=int(self.pop_size * .1))
-                        new_pop = self._balanced_population(int(self.pop_size * .1))
+                        new_pop = self._balanced_population(int(self.pop_size * .52))
+                        # new_pop = self._balanced_population(deficit)
 
                         pop = (offsprings + new_pop)
                         random.shuffle(pop)
-                        pop = pop[:self.pop_size]  # fix overshoot
+                        # pop = pop[:self.pop_size]  # fix overshoot
 
-                    pop = self._rebalance(pop)
+                        pop = self._rebalance2(pop)
 
                 # remove all ind that have dimensionality mismatch
                 clean_pop = [ind for ind in pop if ind.dim_mismatch is False] + self.hof.items
@@ -251,6 +275,9 @@ class PolySymModel(Configurator):
 
         best_item = self.hof[0]
         self.best_fit = best_item.fitness
+
+        # Get the lowest depth
+        self.best_depth = [k for k, v in self.best_per_depth.items() if v[0] == self.best_fit][0]
 
         self.fitted = True
 

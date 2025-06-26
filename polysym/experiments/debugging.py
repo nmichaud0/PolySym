@@ -54,13 +54,13 @@ model = PolySymModel(X3d=X3d,
                         min_complexity=1,
                         max_complexity=4,
                         pop_size=200,
-                        max_iter=200,
+                        max_iter=20,
                         scale=False,
                         fitness_fn = r2,
                         fitness_obj = 1,
                         seed=43,
                         verbose=1,
-                        optimize_ephemerals=True,
+                        optimize_ephemerals=False,
                         workers=1)
 
 #model.eval_expr('add(add(x0, v0), mul(v0, v1))')

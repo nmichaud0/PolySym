@@ -21,6 +21,8 @@ def r2(y_pred: Tensor, y_true: Tensor):
 
     # flatten in case of multi‑dimensional targets
     yt, yp = y_true, y_pred
+    if list(y_true.flatten().isnan()) != list(y_pred.flatten().isnan()):
+        return float('nan')
     y_pred = clean(y_pred).reshape(-1)
     y_true = clean(y_true).reshape(-1)
 
